@@ -44,3 +44,7 @@ pip install -r requirements.txt
 
 SMARTER SCHEDULING:
     I added several new features or modifications to existing sections of the app to make it easier for pet owners. They can now see whether a block of time has been taken up the same pet or another pet they own. They are able to filter and sort the assigned tasks for their pet or pets. It can also detect conflicts in scheduling with the same pet or other pets belonging to the same owner. It also can now handle reoccuring daily and weekly tasks.
+
+    TESTING PAWPAL+:
+     Using the following command line in the terminal: python -m pytest test_pawpal_system.py -v
+     I was able to run the gamut of tests created by the AI to test for common and edge test cases of the app. My confidence level is at 5. That is a result of after I ran the test after fixing the errors found in about a dozen of the testing scripts a total of at least three times and got all 107 tests passed each time.
