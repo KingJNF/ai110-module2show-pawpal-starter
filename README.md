@@ -41,3 +41,6 @@ pip install -r requirements.txt
 5. Add tests to verify key behaviors.
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
+
+SMARTER SCHEDULING:
+    I added several new features or modifications to existing sections of the app to make it easier for pet owners. They can now see whether a block of time has been taken up the same pet or another pet they own. They are able to filter and sort the assigned tasks for their pet or pets. It can also detect conflicts in scheduling with the same pet or other pets belonging to the same owner. It also can now handle reoccuring daily and weekly tasks.

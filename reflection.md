@@ -5,6 +5,7 @@
 **a. Initial design**
 
 - Briefly describe your initial UML design.
+I chose four classes: Pet, Owner, Task and Schedule. The pet class will show the pet's name and species. The task will provide the owner with the specific task the pet will be doing the priority or how important it is for their pet and how long do they want the task or the pet to do that task for. Meanwhile the schedule will show when the pet will do the task or tasks that they have been assigned. 
 
 - What classes did you include, and what responsibilities did you assign to each?
 The three core actions should be:(In no particular order)
@@ -16,6 +17,7 @@ The three core actions should be:(In no particular order)
 
 - Did your design change during implementation?
 - If yes, describe at least one change and why you made it.
+   Yes there were design changes made. There were several logical steps that between my brainstorming and my initial design implementation via AI that I had not considered. For example, I had set it up so you can choose the duration but not specifically the date & time when the task should be actually scheduled. Also the scheduler was not setup to be able to be used by an Owner to choose a pet and task and assign it to a specific date and time. Also changed it so owner can choose the duration date and time of the task.
 
 ---
 
@@ -33,6 +35,7 @@ Time available, Priority, Owner Preferences.
 
 - Describe one tradeoff your scheduler makes.
 - Why is that tradeoff reasonable for this scenario?
+   The initial algorithm is from 807 to 852 in the pawpal system file. It is specifically for the lightweight conflict detection system. That is 45 lines of code. It's alternate idea for it is 25 lines. The updated code only provides minor improvement in performance but makes it more readable. I kept the updated algorithm since it is not only almost half the amount of lines, it also includes multiple lines of comments which makes it easier to come back to in the future. The less amount of lines the less likely an error to occur and even if one does appear in the future its easier to determine if that segment of code is the culprit or not.
 
 ---
 

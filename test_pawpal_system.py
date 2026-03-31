@@ -1,6 +1,9 @@
+from unittest import result
+from zoneinfo import ZoneInfo
+
 import pytest
-from datetime import datetime, timedelta
-from pawpal_system import Owner, Task, TaskType, Status
+from datetime import date, datetime, time, timedelta
+from pawpal_system import Owner, Task, TaskType, Status, Frequency
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -229,7 +232,7 @@ class TestScheduler:
 
     def test_build_schedule_seeds_84_slots(self, owner, pet):
         schedule = owner.scheduler.build_schedule([pet])
-        assert len(schedule) == 7 * 12  # 7 days × 12 hourly slots (8 AM–7 PM)
+        assert len(schedule) == 7 * 24  # 24 half-hour slots per day (8AM–8PM)
 
     def test_build_schedule_all_empty_with_no_tasks(self, owner, pet):
         schedule = owner.scheduler.build_schedule([pet])
@@ -239,9 +242,11 @@ class TestScheduler:
         owner.assign_task_to_pet(pet, walk_task)
         owner.scheduler.assign_task_to_schedule(pet, walk_task, future_date, slot_time)
         schedule = owner.scheduler.build_schedule([pet])
-        slot = datetime(future_date.year, future_date.month, future_date.day,
-                        slot_time.hour, slot_time.minute, slot_time.second)
-        assert any(b["task_name"] == "Morning Walk" for b in schedule[slot])
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("UTC")
+        slot_key = datetime(future_date.year, future_date.month, future_date.day,
+                            slot_time.hour, slot_time.minute, tzinfo=tz)
+        assert len(schedule[slot_key]) == 1
 
     def test_build_schedule_rejects_other_owners_pet(self, owner, other_pet):
         with pytest.raises(ValueError, match="your own pets"):
@@ -249,7 +254,7 @@ class TestScheduler:
 
     def test_build_schedule_stores_result_in_self(self, owner, pet):
         owner.scheduler.build_schedule([pet])
-        assert len(owner.scheduler.schedule) == 84
+        assert len(owner.scheduler.schedule) == 168
 
     # ── view_schedule ───────────────────────────────────────────────────────
 
@@ -295,7 +300,7 @@ class TestScheduler:
         owner.create_pet("Rex")
         owner.create_pet("Luna")
         entries = owner.scheduler.view_schedule()
-        assert len(entries) == 84
+        assert len(entries) == 168
 
     # ── get_available_slots ─────────────────────────────────────────────────
 
@@ -310,14 +315,14 @@ class TestScheduler:
 
     def test_get_available_slots_filtered_by_date_returns_12(self, owner, pet, future_date):
         slots = owner.scheduler.get_available_slots([pet], date=future_date)
-        assert len(slots) == 12
+        assert len(slots) == 24 # 24 half-hour slots per day
         assert all(s["date"] == future_date.strftime("%Y-%m-%d") for s in slots)
 
     def test_get_available_slots_filtered_date_excludes_booked(self, owner, pet, walk_task, future_date, slot_time):
         owner.assign_task_to_pet(pet, walk_task)
         owner.scheduler.assign_task_to_schedule(pet, walk_task, future_date, slot_time)
         slots = owner.scheduler.get_available_slots([pet], date=future_date)
-        assert len(slots) == 11  # one of the 12 slots is booked
+        assert len(slots) == 23  # 24 with one already booked.
 
     # ── get_slot_info ───────────────────────────────────────────────────────
 
@@ -411,8 +416,9 @@ class TestScheduler:
     def test_assign_task_sets_date_time_and_pending_status(self, owner, pet, walk_task, future_date, slot_time):
         owner.assign_task_to_pet(pet, walk_task)
         owner.scheduler.assign_task_to_schedule(pet, walk_task, future_date, slot_time)
-        assert walk_task.scheduled_date == future_date
-        assert walk_task.scheduled_time == slot_time
+        assert walk_task.scheduled_date.date() == future_date.date()
+        assert walk_task.scheduled_time.hour == slot_time.hour
+        assert walk_task.scheduled_time.minute == slot_time.minute
         assert walk_task.status == Status.PENDING
 
     def test_assign_task_conflict_same_slot_raises(self, owner, pet, future_date, slot_time):
@@ -421,7 +427,7 @@ class TestScheduler:
         owner.assign_task_to_pet(pet, t1)
         owner.assign_task_to_pet(pet, t2)
         owner.scheduler.assign_task_to_schedule(pet, t1, future_date, slot_time)
-        with pytest.raises(ValueError, match="Conflict"):
+        with pytest.raises(ValueError, match="Time conflict|Conflict"):
             owner.scheduler.assign_task_to_schedule(pet, t2, future_date, slot_time)
 
     def test_assign_completed_task_raises(self, owner, pet, walk_task, future_date, slot_time):
@@ -461,10 +467,11 @@ class TestScheduler:
         owner.scheduler.assign_task_to_schedule(pet, walk_task, future_date, slot_time)
         new_date = future_date + timedelta(days=1)
         result = owner.scheduler.move_task(pet, walk_task, new_date, slot_time)
-        assert walk_task.scheduled_date == new_date
+        assert walk_task.scheduled_date.date() == new_date.date()
         assert result["previous_slot"] is not None
-        assert result["new_slot"] == datetime(new_date.year, new_date.month, new_date.day,
-                                              slot_time.hour, slot_time.minute, slot_time.second)
+        assert result["new_slot"].date() == new_date.date()
+        assert result["new_slot"].hour == slot_time.hour
+        assert result["new_slot"].minute == slot_time.minute
 
     def test_move_task_conflict_raises(self, owner, pet, future_date):
         t1 = Task(type=TaskType.WALKING, name="Walk", description="d", duration_minutes=30, priority=1)
@@ -475,7 +482,7 @@ class TestScheduler:
         s2 = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
         owner.scheduler.assign_task_to_schedule(pet, t1, future_date, s1)
         owner.scheduler.assign_task_to_schedule(pet, t2, future_date, s2)
-        with pytest.raises(ValueError, match="Conflict"):
+        with pytest.raises(ValueError, match="Time conflict|Conflict"):
             owner.scheduler.move_task(pet, t2, future_date, s1)
 
     def test_move_completed_task_raises(self, owner, pet, walk_task, future_date, slot_time):
@@ -511,20 +518,6 @@ def test_owner_can_create_pet_and_assign_task():
     assert task.pet == pet
 
 
-def test_schedule_conflict_is_raised():
-    owner = Owner("Jane", "Doe", "jane@example.com", "123", "addr")
-    pet = owner.create_pet("Fido", animal_type="Dog")
-    task1 = Task(type=TaskType.WALKING,    name="Walk", description="Walk", duration_minutes=30, priority=1)
-    task2 = Task(type=TaskType.ENRICHMENT, name="Play", description="Play", duration_minutes=30, priority=1)
-    owner.assign_task_to_pet(pet, task1)
-    owner.assign_task_to_pet(pet, task2)
-    date = datetime.now() + timedelta(days=3)
-    time = datetime.now().replace(hour=18, minute=0, second=0, microsecond=0)
-    owner.scheduler.assign_task_to_schedule(pet, task1, date, time)
-    with pytest.raises(ValueError, match="Conflict"):
-        owner.scheduler.assign_task_to_schedule(pet, task2, date, time)
-
-
 def test_task_moves_and_reporting():
     owner = Owner("Jane", "Doe", "jane@example.com", "123", "addr")
     pet = owner.create_pet("Fido", animal_type="Dog")
@@ -532,15 +525,17 @@ def test_task_moves_and_reporting():
                 duration_minutes=10, priority=1)
     owner.assign_task_to_pet(pet, task)
     date = datetime.now() + timedelta(days=1)
-    time = datetime.now().replace(hour=20, minute=0, second=0, microsecond=0)
+    # 10-min task at 15:00 → ends at 15:10, safely within 8AM-8PM
+    time = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
     owner.scheduler.assign_task_to_schedule(pet, task, date, time)
     assert task.status == Status.PENDING
     later_date = date + timedelta(days=1)
     move_info = owner.scheduler.move_task(pet, task, later_date, time)
     assert move_info["previous_slot"] is not None
-    assert move_info["new_slot"] == datetime(later_date.year, later_date.month, later_date.day,
-                                             time.hour, time.minute, time.second)
-    assert task.scheduled_date == later_date
+    assert move_info["new_slot"].date() == later_date.date()
+    assert move_info["new_slot"].hour == time.hour
+    assert move_info["new_slot"].minute == time.minute
+    assert task.scheduled_date.date() == later_date.date()
 
 
 def test_build_schedule_shows_tasks_for_multiple_pets():
@@ -556,13 +551,16 @@ def test_build_schedule_shows_tasks_for_multiple_pets():
     owner.scheduler.assign_task_to_schedule(pet1, task1, date, time)
     owner.scheduler.assign_task_to_schedule(pet2, task2, date, time + timedelta(hours=1))
     schedule = owner.scheduler.build_schedule([pet1, pet2])
-    slot1 = datetime(date.year, date.month, date.day, time.hour, time.minute, time.second)
-    slot2 = datetime(date.year, date.month, date.day, time.hour + 1, time.minute, time.second)
-    # build_schedule now returns booking dicts, not Task objects
+    tz = ZoneInfo("UTC")
+    # slot1 = 10:00 AM (where Walk is scheduled)
+    slot1 = datetime(date.year, date.month, date.day, 10, 0, tzinfo=tz)
+    # slot2 = 11:00 AM (where Bath is scheduled — one hour later!)
+    slot2 = datetime(date.year, date.month, date.day, 11, 0, tzinfo=tz)
     assert len(schedule[slot1]) == 1
     assert schedule[slot1][0]["task_name"] == "Walk"
     assert len(schedule[slot2]) == 1
     assert schedule[slot2][0]["task_name"] == "Bath"
+
 
 
 def test_pet_update_and_summary():
@@ -604,3 +602,814 @@ def test_owner_view_tasks_for_multiple_pets():
     combined = owner.view_tasks_for_pets([pet1, pet2])
     assert t1 in combined
     assert t2 in combined
+
+
+# ===================================================================
+# Helper: create a time on a given date
+# ===================================================================
+
+def _time_on(base_date, hour, minute=0):
+    """Return a datetime combining base_date's date with the given hour/minute."""
+    return base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+# ===================================================================
+# ✅ HAPPY PATH — sort_tasks_by_time
+# ===================================================================
+
+def test_sort_by_time_out_of_order(owner, pet, future_date):
+    """Tasks added at 2PM, 8AM, 12PM should display as 8AM, 12PM, 2PM."""
+    task_2pm = Task(type=TaskType.WALKING, name="Afternoon Walk",
+                    description="Walk", duration_minutes=30, priority=5)
+    task_8am = Task(type=TaskType.FEEDING, name="Morning Feed",
+                    description="Kibble", duration_minutes=5, priority=9)
+    task_12pm = Task(type=TaskType.ENRICHMENT, name="Puzzle Time",
+                     description="Snuffle mat", duration_minutes=20, priority=6)
+
+    # Add in REVERSE chronological order
+    owner.assign_task_to_pet(pet, task_2pm)
+    owner.assign_task_to_pet(pet, task_8am)
+    owner.assign_task_to_pet(pet, task_12pm)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, task_2pm, future_date, _time_on(future_date, 14))
+    owner.scheduler.assign_task_to_schedule(
+        pet, task_8am, future_date, _time_on(future_date, 8))
+    owner.scheduler.assign_task_to_schedule(
+        pet, task_12pm, future_date, _time_on(future_date, 12))
+
+    result = owner.scheduler.sort_tasks_by_time()
+
+    assert len(result) == 3
+    assert result[0]["task_name"] == "Morning Feed"     # 8 AM
+    assert result[1]["task_name"] == "Puzzle Time"      # 12 PM
+    assert result[2]["task_name"] == "Afternoon Walk"   # 2 PM
+
+
+def test_sort_by_time_multiple_pets(owner, pet, future_date):
+    """Sorting should interleave tasks from different pets by time."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    dog_task = Task(type=TaskType.WALKING, name="Dog Walk",
+                    description="x", duration_minutes=30, priority=7)
+    cat_task = Task(type=TaskType.FEEDING, name="Cat Feed",
+                    description="x", duration_minutes=5, priority=9)
+
+    owner.assign_task_to_pet(pet, dog_task)
+    owner.assign_task_to_pet(cat, cat_task)
+
+    # Cat at 8AM, Dog at 10AM
+    owner.scheduler.assign_task_to_schedule(
+        pet, dog_task, future_date, _time_on(future_date, 10))
+    owner.scheduler.assign_task_to_schedule(
+        cat, cat_task, future_date, _time_on(future_date, 8))
+
+    result = owner.scheduler.sort_tasks_by_time()
+
+    assert result[0]["pet_name"] == "Mittens"   # 8 AM first
+    assert result[1]["pet_name"] == "Fido"      # 10 AM second
+
+
+def test_sort_by_time_across_multiple_days(owner, pet, future_date):
+    """Tasks on different days should sort by date then time."""
+    day1_task = Task(type=TaskType.FEEDING, name="Day 1 Feed",
+                     description="x", duration_minutes=5, priority=9)
+    day3_task = Task(type=TaskType.WALKING, name="Day 3 Walk",
+                     description="x", duration_minutes=30, priority=7)
+
+    day3 = future_date + timedelta(days=2)
+
+    # Add day 3 first, then day 1
+    owner.assign_task_to_pet(pet, day3_task)
+    owner.assign_task_to_pet(pet, day1_task)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, day3_task, day3, _time_on(day3, 8))
+    owner.scheduler.assign_task_to_schedule(
+        pet, day1_task, future_date, _time_on(future_date, 8))
+
+    result = owner.scheduler.sort_tasks_by_time()
+
+    assert result[0]["task_name"] == "Day 1 Feed"
+    assert result[1]["task_name"] == "Day 3 Walk"
+
+
+def test_sort_by_time_returns_expected_fields(owner, pet, future_date, walk_task):
+    """Each entry should contain all required display fields."""
+    owner.assign_task_to_pet(pet, walk_task)
+    owner.scheduler.assign_task_to_schedule(
+        pet, walk_task, future_date, _time_on(future_date, 10))
+
+    result = owner.scheduler.sort_tasks_by_time()
+
+    assert len(result) == 1
+    entry = result[0]
+    expected_keys = {
+        "pet_name", "task_name", "task_type", "priority",
+        "duration_minutes", "status", "frequency",
+        "scheduled_date", "scheduled_time", "end_time",
+    }
+    assert expected_keys.issubset(entry.keys())
+
+
+# ===================================================================
+# ✅ HAPPY PATH — filter_tasks
+# ===================================================================
+
+def test_filter_by_pet_returns_only_that_pet(owner, pet, future_date):
+    """Filtering by pet should return only that pet's tasks."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    dog_task = Task(type=TaskType.WALKING, name="Dog Walk",
+                    description="x", duration_minutes=30, priority=7)
+    cat_task = Task(type=TaskType.FEEDING, name="Cat Feed",
+                    description="x", duration_minutes=5, priority=9)
+
+    owner.assign_task_to_pet(pet, dog_task)
+    owner.assign_task_to_pet(cat, cat_task)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, dog_task, future_date, _time_on(future_date, 10))
+    owner.scheduler.assign_task_to_schedule(
+        cat, cat_task, future_date, _time_on(future_date, 8))
+
+    result = owner.scheduler.filter_tasks(pet=pet)
+
+    assert len(result) == 1
+    assert result[0]["pet_name"] == "Fido"
+
+
+def test_filter_by_status_pending(owner, pet, future_date):
+    """Filtering by PENDING should exclude completed tasks."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5, priority=9)
+    walk = Task(type=TaskType.WALKING, name="Walk",
+                description="x", duration_minutes=30, priority=7)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.assign_task_to_pet(pet, walk)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+    owner.scheduler.assign_task_to_schedule(
+        pet, walk, future_date, _time_on(future_date, 14))
+
+    feed.complete_task()
+
+    result = owner.scheduler.filter_tasks(status=Status.PENDING)
+
+    assert len(result) == 1
+    assert result[0]["task_name"] == "Walk"
+
+
+def test_filter_by_status_completed(owner, pet, future_date):
+    """Filtering by COMPLETED should only return completed tasks."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5, priority=9)
+    walk = Task(type=TaskType.WALKING, name="Walk",
+                description="x", duration_minutes=30, priority=7)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.assign_task_to_pet(pet, walk)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+    owner.scheduler.assign_task_to_schedule(
+        pet, walk, future_date, _time_on(future_date, 14))
+
+    feed.complete_task()
+
+    result = owner.scheduler.filter_tasks(status=Status.COMPLETED)
+
+    assert len(result) == 1
+    assert result[0]["task_name"] == "Feed"
+
+
+def test_filter_combined_pet_and_status(owner, pet, future_date):
+    """Filtering by both pet AND status should narrow correctly."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    dog_feed = Task(type=TaskType.FEEDING, name="Dog Feed",
+                    description="x", duration_minutes=5, priority=9)
+    dog_walk = Task(type=TaskType.WALKING, name="Dog Walk",
+                    description="x", duration_minutes=30, priority=7)
+    cat_feed = Task(type=TaskType.FEEDING, name="Cat Feed",
+                    description="x", duration_minutes=5, priority=9)
+
+    owner.assign_task_to_pet(pet, dog_feed)
+    owner.assign_task_to_pet(pet, dog_walk)
+    owner.assign_task_to_pet(cat, cat_feed)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, dog_feed, future_date, _time_on(future_date, 8))
+    owner.scheduler.assign_task_to_schedule(
+        pet, dog_walk, future_date, _time_on(future_date, 14))
+    owner.scheduler.assign_task_to_schedule(
+        cat, cat_feed, future_date, _time_on(future_date, 9))
+
+    dog_feed.complete_task()
+
+    result = owner.scheduler.filter_tasks(pet=pet, status=Status.PENDING)
+
+    assert len(result) == 1
+    assert result[0]["task_name"] == "Dog Walk"
+    assert result[0]["pet_name"] == "Fido"
+
+
+def test_filter_results_are_sorted_by_time(owner, pet, future_date):
+    """Filtered results should still be in chronological order."""
+    walk = Task(type=TaskType.WALKING, name="Walk",
+                description="x", duration_minutes=30, priority=7)
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5, priority=9)
+
+    # Add walk first (2PM), then feed (8AM)
+    owner.assign_task_to_pet(pet, walk)
+    owner.assign_task_to_pet(pet, feed)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, walk, future_date, _time_on(future_date, 14))
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+
+    result = owner.scheduler.filter_tasks(pet=pet)
+
+    assert result[0]["task_name"] == "Feed"   # 8 AM first
+    assert result[1]["task_name"] == "Walk"   # 2 PM second
+
+
+# ===================================================================
+# ✅ HAPPY PATH — detect_conflicts
+# ===================================================================
+
+def test_no_conflicts_returns_empty_list(owner, pet, future_date):
+    """Non-overlapping tasks should produce zero warnings."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5, priority=9)
+    walk = Task(type=TaskType.WALKING, name="Walk",
+                description="x", duration_minutes=30, priority=7)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.assign_task_to_pet(pet, walk)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+    owner.scheduler.assign_task_to_schedule(
+        pet, walk, future_date, _time_on(future_date, 14))
+
+    warnings = owner.scheduler.detect_conflicts()
+    assert warnings == []
+
+
+def test_cross_pet_conflict_detected(owner, pet, future_date):
+    """Two tasks for different pets at the same time should produce a warning."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    dog_walk = Task(type=TaskType.WALKING, name="Dog Walk",
+                    description="x", duration_minutes=30, priority=8)
+    cat_play = Task(type=TaskType.ENRICHMENT, name="Cat Play",
+                    description="x", duration_minutes=20, priority=7)
+
+    owner.assign_task_to_pet(pet, dog_walk)
+    owner.assign_task_to_pet(cat, cat_play)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, dog_walk, future_date, _time_on(future_date, 14))
+    owner.scheduler.assign_task_to_schedule(
+        cat, cat_play, future_date, _time_on(future_date, 14))
+
+    warnings = owner.scheduler.detect_conflicts()
+
+    assert len(warnings) == 1
+    assert "CROSS-PET" in warnings[0]
+
+
+def test_conflict_warning_contains_task_names(owner, pet, future_date):
+    """Warning string should include both task names."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    t1 = Task(type=TaskType.WALKING, name="Dog Walk",
+              description="x", duration_minutes=30, priority=8)
+    t2 = Task(type=TaskType.ENRICHMENT, name="Cat Play",
+              description="x", duration_minutes=20, priority=7)
+
+    owner.assign_task_to_pet(pet, t1)
+    owner.assign_task_to_pet(cat, t2)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, t1, future_date, _time_on(future_date, 14))
+    owner.scheduler.assign_task_to_schedule(
+        cat, t2, future_date, _time_on(future_date, 14))
+
+    warnings = owner.scheduler.detect_conflicts()
+
+    assert "Dog Walk" in warnings[0]
+    assert "Cat Play" in warnings[0]
+
+
+def test_conflict_detection_never_crashes(owner, pet, future_date):
+    """detect_conflicts should return a list, never raise exceptions."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    t1 = Task(type=TaskType.WALKING, name="Walk",
+              description="x", duration_minutes=30, priority=8)
+    t2 = Task(type=TaskType.ENRICHMENT, name="Play",
+              description="x", duration_minutes=20, priority=7)
+
+    owner.assign_task_to_pet(pet, t1)
+    owner.assign_task_to_pet(cat, t2)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, t1, future_date, _time_on(future_date, 14))
+    owner.scheduler.assign_task_to_schedule(
+        cat, t2, future_date, _time_on(future_date, 14))
+
+    try:
+        warnings = owner.scheduler.detect_conflicts()
+        assert isinstance(warnings, list)
+    except Exception:
+        pytest.fail("detect_conflicts() raised an exception — it should only warn!")
+
+
+# ===================================================================
+# ✅ HAPPY PATH — complete_and_renew (recurring tasks)
+# ===================================================================
+
+def test_daily_task_renews_plus_one_day(owner, pet, future_date):
+    """Completing a daily task should create a new one at +1 day."""
+    feed = Task(type=TaskType.FEEDING, name="Morning Feed",
+                description="Breakfast", duration_minutes=5,
+                priority=9, frequency=Frequency.DAILY)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+
+    original_date = feed.scheduled_date
+    new_task = owner.scheduler.complete_and_renew(pet, feed)
+
+    assert feed.status == Status.COMPLETED
+    assert new_task is not None
+    expected = original_date + timedelta(days=1)
+    assert new_task.scheduled_date.date() == expected.date()
+
+
+def test_weekly_task_renews_plus_seven_days(owner, pet, future_date):
+    """Completing a weekly task should create a new one at +7 days."""
+    groom = Task(type=TaskType.GROOMING, name="Brush Fur",
+                 description="Weekly brush", duration_minutes=30,
+                 priority=5, frequency=Frequency.WEEKLY)
+
+    owner.assign_task_to_pet(pet, groom)
+    owner.scheduler.assign_task_to_schedule(
+        pet, groom, future_date, _time_on(future_date, 10))
+
+    original_date = groom.scheduled_date
+    new_task = owner.scheduler.complete_and_renew(pet, groom)
+
+    assert groom.status == Status.COMPLETED
+    assert new_task is not None
+    expected = original_date + timedelta(days=7)
+    assert new_task.scheduled_date.date() == expected.date()
+
+
+def test_monthly_task_renews_plus_thirty_days(owner, pet, future_date):
+    """Completing a monthly task should create a new one at +30 days."""
+    bath = Task(type=TaskType.BATHING, name="Monthly Bath",
+                description="Full bath", duration_minutes=45,
+                priority=4, frequency=Frequency.MONTHLY)
+
+    owner.assign_task_to_pet(pet, bath)
+    owner.scheduler.assign_task_to_schedule(
+        pet, bath, future_date, _time_on(future_date, 9))
+
+    original_date = bath.scheduled_date
+    new_task = owner.scheduler.complete_and_renew(pet, bath)
+
+    assert new_task is not None
+    expected = original_date + timedelta(days=30)
+    assert new_task.scheduled_date.date() == expected.date()
+
+
+def test_custom_frequency_respects_interval_days(owner, pet, future_date):
+    """Custom with repeat_interval_days=2 should schedule +2 days."""
+    med = Task(type=TaskType.MEDICATION, name="Allergy Pill",
+               description="Every other day", duration_minutes=5,
+               priority=10, frequency=Frequency.CUSTOM,
+               repeat_count=5, repeat_interval_days=2)
+
+    owner.assign_task_to_pet(pet, med)
+    owner.scheduler.assign_task_to_schedule(
+        pet, med, future_date, _time_on(future_date, 18))
+
+    original_date = med.scheduled_date
+    new_task = owner.scheduler.complete_and_renew(pet, med)
+
+    assert new_task is not None
+    expected = original_date + timedelta(days=2)
+    assert new_task.scheduled_date.date() == expected.date()
+
+
+def test_renewed_task_inherits_properties(owner, pet, future_date):
+    """New occurrence should keep type, priority, duration, frequency, name."""
+    feed = Task(type=TaskType.FEEDING, name="Morning Feed",
+                description="Kibble", duration_minutes=5,
+                priority=9, frequency=Frequency.DAILY)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+
+    new_task = owner.scheduler.complete_and_renew(pet, feed)
+
+    assert new_task is not None
+    assert new_task.type == feed.type
+    assert new_task.name == feed.name
+    assert new_task.priority == feed.priority
+    assert new_task.duration_minutes == feed.duration_minutes
+    assert new_task.frequency == feed.frequency
+
+
+def test_renewed_task_status_is_pending(owner, pet, future_date):
+    """Auto-created occurrence should start as PENDING (it's in the future)."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5,
+                priority=9, frequency=Frequency.DAILY)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+
+    new_task = owner.scheduler.complete_and_renew(pet, feed)
+
+    assert new_task is not None
+    assert new_task.status == Status.PENDING
+
+
+def test_occurrence_counter_increments_on_complete(owner, pet, future_date):
+    """Completing a task should bump occurrences_completed by 1."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5,
+                priority=9, frequency=Frequency.DAILY)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+
+    assert feed.occurrences_completed == 0
+    owner.scheduler.complete_and_renew(pet, feed)
+    assert feed.occurrences_completed == 1
+
+
+def test_renewed_task_added_to_pet_task_list(owner, pet, future_date):
+    """The new occurrence should appear in the pet's task list."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5,
+                priority=9, frequency=Frequency.DAILY)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+
+    count_before = len(pet.tasks)
+    owner.scheduler.complete_and_renew(pet, feed)
+
+    assert len(pet.tasks) == count_before + 1
+
+
+def test_chained_daily_renewals_increment_correctly(owner, pet, future_date):
+    """Completing and renewing a daily task twice should yield +1 day, then +2 days."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5,
+                priority=9, frequency=Frequency.DAILY)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+
+    # First renewal: future_date → future_date + 1
+    task_2 = owner.scheduler.complete_and_renew(pet, feed)
+    assert task_2 is not None
+    assert task_2.scheduled_date.date() == (future_date + timedelta(days=1)).date()
+
+    # Second renewal: future_date + 1 → future_date + 2
+    task_3 = owner.scheduler.complete_and_renew(pet, task_2)
+    assert task_3 is not None
+    assert task_3.scheduled_date.date() == (future_date + timedelta(days=2)).date()
+
+
+# ===================================================================
+# 🔶 EDGE CASE — sort_tasks_by_time
+# ===================================================================
+
+def test_sort_pet_with_no_tasks(owner, pet):
+    """A pet with zero tasks should return an empty list, not crash."""
+    result = owner.scheduler.sort_tasks_by_time()
+    assert result == []
+
+
+def test_sort_owner_with_no_pets(owner):
+    """An owner with no pets should return an empty list."""
+    fresh = Owner("X", "Y", "x@y.com", "555", "1 St")
+    result = fresh.scheduler.sort_tasks_by_time()
+    assert result == []
+
+
+def test_sort_two_tasks_exact_same_time_both_appear(owner, pet, future_date):
+    """Two tasks at the exact same time should BOTH appear in results."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    t1 = Task(type=TaskType.FEEDING, name="Dog Feed",
+              description="x", duration_minutes=5, priority=9)
+    t2 = Task(type=TaskType.FEEDING, name="Cat Feed",
+              description="x", duration_minutes=5, priority=9)
+
+    owner.assign_task_to_pet(pet, t1)
+    owner.assign_task_to_pet(cat, t2)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, t1, future_date, _time_on(future_date, 8))
+    owner.scheduler.assign_task_to_schedule(
+        cat, t2, future_date, _time_on(future_date, 8))
+
+    result = owner.scheduler.sort_tasks_by_time()
+    eight_am = [t for t in result if t["scheduled_time"] == "08:00"]
+    assert len(eight_am) == 2
+
+
+def test_sort_excludes_unscheduled_tasks(owner, pet, future_date):
+    """Tasks without a scheduled date should NOT appear in sorted results."""
+    scheduled = Task(type=TaskType.FEEDING, name="Scheduled",
+                     description="x", duration_minutes=5, priority=9)
+    unscheduled = Task(type=TaskType.WALKING, name="Unscheduled",
+                       description="x", duration_minutes=30, priority=7)
+
+    owner.assign_task_to_pet(pet, scheduled)
+    owner.assign_task_to_pet(pet, unscheduled)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, scheduled, future_date, _time_on(future_date, 8))
+    # unscheduled deliberately NOT scheduled
+
+    result = owner.scheduler.sort_tasks_by_time()
+
+    assert len(result) == 1
+    assert result[0]["task_name"] == "Scheduled"
+
+
+def test_sort_completed_tasks_still_appear(owner, pet, future_date):
+    """Completed tasks still have dates, so they should still appear."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5, priority=9)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+    feed.complete_task()
+
+    result = owner.scheduler.sort_tasks_by_time()
+
+    assert len(result) == 1
+    assert result[0]["status"] == "completed"
+
+
+def test_sort_single_task(owner, pet, future_date, walk_task):
+    """Sorting with one task should return a list of length 1."""
+    owner.assign_task_to_pet(pet, walk_task)
+    owner.scheduler.assign_task_to_schedule(
+        pet, walk_task, future_date, _time_on(future_date, 10))
+
+    result = owner.scheduler.sort_tasks_by_time()
+
+    assert len(result) == 1
+    assert result[0]["task_name"] == "Morning Walk"
+
+
+# ===================================================================
+# 🔶 EDGE CASE — filter_tasks
+# ===================================================================
+
+def test_filter_no_matching_status_returns_empty(owner, pet, future_date):
+    """Filtering by a status no task has should return empty list."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5, priority=9)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+
+    result = owner.scheduler.filter_tasks(status=Status.COMPLETED)
+    assert result == []
+
+
+def test_filter_pet_with_no_tasks_returns_empty(owner, pet, future_date):
+    """Filtering by a pet that has no scheduled tasks returns empty list."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    dog_task = Task(type=TaskType.WALKING, name="Walk",
+                    description="x", duration_minutes=30, priority=7)
+    owner.assign_task_to_pet(pet, dog_task)
+    owner.scheduler.assign_task_to_schedule(
+        pet, dog_task, future_date, _time_on(future_date, 10))
+
+    result = owner.scheduler.filter_tasks(pet=cat)
+    assert result == []
+
+
+def test_filter_no_args_returns_all_tasks(owner, pet, future_date):
+    """Calling filter_tasks() with no arguments should return everything."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    t1 = Task(type=TaskType.FEEDING, name="Feed",
+              description="x", duration_minutes=5, priority=9)
+    t2 = Task(type=TaskType.WALKING, name="Walk",
+              description="x", duration_minutes=30, priority=7)
+
+    owner.assign_task_to_pet(pet, t1)
+    owner.assign_task_to_pet(cat, t2)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, t1, future_date, _time_on(future_date, 8))
+    owner.scheduler.assign_task_to_schedule(
+        cat, t2, future_date, _time_on(future_date, 14))
+
+    result = owner.scheduler.filter_tasks()
+    assert len(result) == 2
+
+
+# ===================================================================
+# 🔶 EDGE CASE — complete_and_renew (recurring tasks)
+# ===================================================================
+
+def test_once_task_no_renewal(owner, pet, future_date):
+    """A ONCE frequency task should NOT create a new occurrence."""
+    bath = Task(type=TaskType.BATHING, name="Bath",
+                description="One-time", duration_minutes=45,
+                priority=3, frequency=Frequency.ONCE)
+
+    owner.assign_task_to_pet(pet, bath)
+    owner.scheduler.assign_task_to_schedule(
+        pet, bath, future_date, _time_on(future_date, 10))
+
+    result = owner.scheduler.complete_and_renew(pet, bath)
+
+    assert bath.status == Status.COMPLETED
+    assert result is None
+
+
+def test_custom_exhausted_no_renewal(owner, pet, future_date):
+    """After all repeat_count occurrences, no renewal should happen."""
+    med = Task(type=TaskType.MEDICATION, name="Short Course",
+               description="Last dose", duration_minutes=5,
+               priority=10, frequency=Frequency.CUSTOM,
+               repeat_count=2, repeat_interval_days=1,
+               occurrences_completed=1)  # 1 of 2 done
+
+    owner.assign_task_to_pet(pet, med)
+    owner.scheduler.assign_task_to_schedule(
+        pet, med, future_date, _time_on(future_date, 18))
+
+    # Complete occurrence 2 of 2
+    new_task = owner.scheduler.complete_and_renew(pet, med)
+
+    assert med.occurrences_completed == 2
+
+    # If a new task was created, it should know it has no more occurrences
+    if new_task is not None:
+        assert not new_task.needs_more_occurrences()
+
+
+def test_unscheduled_recurring_task_no_renewal(owner, pet):
+    """A recurring task with no scheduled date cannot calculate next date."""
+    feed = Task(type=TaskType.FEEDING, name="Feed",
+                description="x", duration_minutes=5,
+                priority=9, frequency=Frequency.DAILY)
+
+    owner.assign_task_to_pet(pet, feed)
+    # NOT scheduling — no date to add timedelta to
+
+    result = owner.scheduler.complete_and_renew(pet, feed)
+
+    assert feed.status == Status.COMPLETED
+    assert result is None
+
+
+def test_custom_no_interval_days_no_renewal(owner, pet, future_date):
+    """Custom frequency with repeat_interval_days=None should return None."""
+    broken = Task(type=TaskType.MEDICATION, name="Broken Med",
+                  description="Missing interval", duration_minutes=5,
+                  priority=5, frequency=Frequency.CUSTOM,
+                  repeat_count=5, repeat_interval_days=None)
+
+    owner.assign_task_to_pet(pet, broken)
+    owner.scheduler.assign_task_to_schedule(
+        pet, broken, future_date, _time_on(future_date, 12))
+
+    result = owner.scheduler.complete_and_renew(pet, broken)
+
+    assert broken.status == Status.COMPLETED
+    assert result is None
+
+
+def test_renewal_slot_conflict_finds_alternative(owner, pet, future_date):
+    """If the preferred renewal slot is taken, it should find another."""
+    feed = Task(type=TaskType.FEEDING, name="Morning Feed",
+                description="x", duration_minutes=5,
+                priority=9, frequency=Frequency.DAILY)
+    blocker = Task(type=TaskType.WALKING, name="Blocker",
+                   description="Blocks the slot",
+                   duration_minutes=30, priority=7,
+                   frequency=Frequency.ONCE)
+
+    owner.assign_task_to_pet(pet, feed)
+    owner.assign_task_to_pet(pet, blocker)
+
+    day_after = future_date + timedelta(days=1)
+
+    # Schedule feed for future_date at 8AM
+    owner.scheduler.assign_task_to_schedule(
+        pet, feed, future_date, _time_on(future_date, 8))
+    # Block the exact 8AM slot on the renewal day
+    owner.scheduler.assign_task_to_schedule(
+        pet, blocker, day_after, _time_on(day_after, 8))
+
+    new_task = owner.scheduler.complete_and_renew(pet, feed)
+
+    # Should still create a task, just not at 8:00
+    assert new_task is not None
+    assert new_task.scheduled_date is not None
+
+
+# ===================================================================
+# 🔶 EDGE CASE — detect_conflicts
+# ===================================================================
+
+def test_detect_conflicts_partial_overlap(owner, pet, future_date):
+    """A 30-min task at 10:00 and a 20-min task at 10:15 should conflict."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    t1 = Task(type=TaskType.WALKING, name="Dog Walk",
+              description="x", duration_minutes=30, priority=8)
+    t2 = Task(type=TaskType.ENRICHMENT, name="Cat Play",
+              description="x", duration_minutes=20, priority=7)
+
+    owner.assign_task_to_pet(pet, t1)
+    owner.assign_task_to_pet(cat, t2)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, t1, future_date, _time_on(future_date, 10))
+    owner.scheduler.assign_task_to_schedule(
+        cat, t2, future_date, _time_on(future_date, 10, 15))
+
+    warnings = owner.scheduler.detect_conflicts()
+    assert len(warnings) >= 1
+
+
+def test_detect_conflicts_adjacent_no_overlap(owner, pet, future_date):
+    """A task ending at 10:30 and another starting at 10:30 should NOT conflict."""
+    t1 = Task(type=TaskType.FEEDING, name="Feed",
+              description="x", duration_minutes=5, priority=9)
+    t2 = Task(type=TaskType.WALKING, name="Walk",
+              description="x", duration_minutes=30, priority=7)
+
+    owner.assign_task_to_pet(pet, t1)
+    owner.assign_task_to_pet(pet, t2)
+
+    # Feed at 10:25 (ends 10:30), Walk at 10:30 — adjacent, not overlapping
+    owner.scheduler.assign_task_to_schedule(
+        pet, t1, future_date, _time_on(future_date, 10, 25))
+    owner.scheduler.assign_task_to_schedule(
+        pet, t2, future_date, _time_on(future_date, 10, 30))
+
+    warnings = owner.scheduler.detect_conflicts()
+    assert warnings == []
+
+
+def test_detect_conflicts_completed_tasks_ignored(owner, pet, future_date):
+    """Completed tasks should be excluded from conflict checks."""
+    cat = owner.create_pet("Mittens", "Cat")
+
+    t1 = Task(type=TaskType.WALKING, name="Walk",
+              description="x", duration_minutes=30, priority=8)
+    t2 = Task(type=TaskType.ENRICHMENT, name="Play",
+              description="x", duration_minutes=20, priority=7)
+
+    owner.assign_task_to_pet(pet, t1)
+    owner.assign_task_to_pet(cat, t2)
+
+    owner.scheduler.assign_task_to_schedule(
+        pet, t1, future_date, _time_on(future_date, 14))
+    owner.scheduler.assign_task_to_schedule(
+        cat, t2, future_date, _time_on(future_date, 14))
+
+    # Complete one — should eliminate the conflict
+    t1.complete_task()
+
+    warnings = owner.scheduler.detect_conflicts()
+    assert warnings == []
+
+
+def test_detect_conflicts_empty_schedule(owner, pet):
+    """No tasks at all should return empty warnings list."""
+    warnings = owner.scheduler.detect_conflicts()
+    assert warnings == []
